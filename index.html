@@ -154,33 +154,34 @@ def run_lsdt_task(counts_flat, alphas_sq_flat, num_a, max_c, max_n, num_pulses):
 
         // --- Pyodide Initialization ---
 
-        btnInit.addEventListener('click', async () => {
+       btnInit.addEventListener('click', async () => {
             btnInit.disabled = true;
-            logMsg("Downloading Pyodide... (This may take a moment)");
+            logMsg("Initializing Environment...");
             try {
-                // 1. Load the core Pyodide environment
-                pyodideInstance = await loadPyodide({
-                    indexURL: "https://cdn.jsdelivr.net/pyodide/v0.25.0/full/"
-                });
+                // 1. Use the official v0.25.0 release
+                pyodideInstance = await loadPyodide();
         
-                logMsg("Pyodide loaded. Loading micropip...");
-                // 2. Load 'micropip' - Pyodide's internal package manager
-                await pyodideInstance.loadPackage("micropip");
-                const micropip = pyodideInstance.pyimport("micropip");
+                logMsg("Pyodide Core Loaded. Loading CVXOPT and NumPy...");
+                
+                // 2. IMPORTANT: loadPackage is for WASM-compiled binaries (like cvxopt)
+                // micropip is only for "Pure Python" packages.
+                await pyodideInstance.loadPackage(["numpy", "cvxopt"]);
         
-                logMsg("Installing cvxopt and numpy via micropip...");
-                // 3. Use micropip to install. This is more reliable for C-extensions.
-                await micropip.install('cvxopt');
-                await micropip.install('numpy');
+                logMsg("Verifying CVXOPT installation...");
+                await pyodideInstance.runPythonAsync(`
+                    import cvxopt
+                    import numpy as np
+                    print("CVXOPT version:", cvxopt.__version__)
+                `);
         
-                logMsg("Packages installed. Loading LSDT Python logic...");
+                logMsg("Loading LSDT Python logic...");
                 await pyodideInstance.runPythonAsync(pythonLSDTCode);
                 
-                logMsg("Ready. You may now upload data.");
+                logMsg("Ready. Upload your experimental data.");
                 btnInit.textContent = "Python Ready";
                 fileInput.disabled = false;
             } catch (err) {
-                logMsg("Failed to load Pyodide: " + err);
+                logMsg("Initialization Failed: " + err.message);
                 console.error(err);
                 btnInit.disabled = false;
                 btnInit.textContent = "Retry Initialization";
