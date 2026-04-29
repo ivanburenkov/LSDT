@@ -74,38 +74,64 @@ import numpy as np
 from scipy.optimize import minimize
 import math
 
-def get_poisson_F(alphas_sq, max_n):
-    F = np.zeros((len(alphas_sq), max_n + 1))
+def get_poisson_matrix(alphas_sq, max_n):
+    num_a = len(alphas_sq)
+    F = np.zeros((num_a, max_n + 1))
     for i, mu in enumerate(alphas_sq):
         for n in range(max_n + 1):
             F[i, n] = np.exp(-mu) * (mu**n) / math.factorial(n)
-    # Completeness
     F[:, -1] = 1.0 - np.sum(F[:, :-1], axis=1)
     return np.clip(F, 0, 1)
 
-def solve_step(counts, alphas_sq, max_c, max_n, pulses, x0_list, iters):
-    P_meas = np.array(counts).reshape((-1, max_c + 1))
-    F_prob = get_poisson_F(alphas_sq, max_n)
-    F_scaled = F_prob * pulses
-    weights = 1.0 / (P_meas + 1.0)
+def run_lsdt_task(counts_flat, alphas_sq_flat, num_a, max_c, max_n, num_pulses, x0_flat, max_iters):
+    # Explicitly define dimensions to prevent reshape errors
+    n_outcomes = max_c + 1
+    k_plus_1 = max_n + 1
+    num_alphas = int(num_a)
     
-    x0 = np.array(x0_list)
+    # Reshape measurements and initial guess
+    P_meas = np.array(counts_flat).reshape((num_alphas, n_outcomes))
+    x0 = np.array(x0_flat)
     
-    def objective_fn(x):
-        povm = x.reshape((max_c + 1, max_n + 1))
-        P_mod = F_scaled @ povm.T
-        return np.sum(weights * ((P_mod - P_meas)**2))
+    # Validation check to catch the 77 vs 66 error early
+    if x0.size != (n_outcomes * k_plus_1):
+        # If size mismatch, reset to uniform to prevent crash
+        x0 = np.ones(n_outcomes * k_plus_1) / n_outcomes
 
-    # Constraint: Each column (Fock state n) sums to 1 over outcomes c
-    cons = [{'type': 'eq', 'fun': lambda x, n_idx=i: np.sum(x.reshape((max_c+1, max_n+1))[:, n_idx]) - 1.0} for i in range(max_n + 1)]
+    F_prob = get_poisson_matrix(np.array(alphas_sq_flat), max_n)
+    F_scaled = F_prob * num_pulses
+    weights = 1.0 / (P_meas + 1.0)
+
+    def objective(x):
+        # Ensure we reshape using the variables, not hardcoded numbers
+        povm = x.reshape((n_outcomes, k_plus_1))
+        P_model = F_scaled @ povm.T
+        return np.sum(weights * ((P_model - P_meas)**2))
+
+    # Constraints: Sum over outcomes (c) for each Fock state (n) must be 1
+    cons = []
+    for n in range(k_plus_1):
+        def sum_to_one(x, n_idx=n):
+            povm = x.reshape((n_outcomes, k_plus_1))
+            return np.sum(povm[:, n_idx]) - 1.0
+        cons.append({'type': 'eq', 'fun': sum_to_one})
+
+    # Bounds: Pi elements between 0 and 1
+    bounds = [(0, 1) for _ in range(x0.size)]
+
+    res = minimize(objective, x0, method='SLSQP', bounds=bounds, 
+                   constraints=cons, options={'maxiter': max_iters})
     
-    res = minimize(objective_fn, x0, method='SLSQP', bounds=[(0,1)]*len(x0), constraints=cons, options={'maxiter': iters})
+    # Return everything needed for the GUI to update
+    povm_res = res.x.reshape((n_outcomes, k_plus_1))
+    P_model_final = F_scaled @ povm_res.T
+    mse = np.mean(((P_model_final/num_pulses) - (P_meas/num_pulses))**2)
     
-    povm_res = res.x.reshape((max_c + 1, max_n + 1))
-    P_mod_out = F_scaled @ povm_res.T
-    mse = np.mean(((P_mod_out/pulses) - (P_meas/pulses))**2)
-    
-    return {"povm_flat": res.x.tolist(), "expected_flat": P_mod_out.flatten().tolist(), "mse": float(mse)}
+    return {
+        "x": res.x.tolist(),
+        "expected": P_model_final.flatten().tolist(),
+        "mse": float(mse)
+    }
 `;
 
         document.getElementById('btn-init').onclick = async () => {
