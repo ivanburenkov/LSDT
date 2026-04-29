@@ -2,46 +2,50 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>LSDT: SLSQP Walking Solver (Fixed)</title>
+    <title>LSDT: SLSQP Walking Solver (Stable)</title>
     <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js"></script>
     <style>
-        body { font-family: sans-serif; background: #f0f2f5; padding: 20px; display: flex; flex-direction: column; gap: 20px; }
+        body { font-family: 'Segoe UI', sans-serif; background: #f4f7f6; padding: 20px; color: #333; max-width: 1500px; margin: 0 auto; }
         .dashboard { display: grid; grid-template-columns: 350px 1fr 1fr; gap: 20px; }
-        .panel { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-        .plot { width: 100%; height: 350px; background: #fafafa; border: 1px solid #ddd; }
-        .controls label { display: block; margin-top: 10px; font-weight: bold; font-size: 0.9em; }
-        input, button { width: 100%; padding: 8px; margin-top: 5px; box-sizing: border-box; }
-        .btn-start { background: #28a745; color: white; border: none; cursor: pointer; font-weight: bold; }
-        .btn-stop { background: #dc3545; color: white; border: none; cursor: pointer; font-weight: bold; margin-top: 5px; }
+        .panel { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .plot { width: 100%; height: 350px; background: #fafafa; border: 1px solid #eee; border-radius: 4px; }
+        .controls label { display: block; margin-top: 12px; font-weight: bold; font-size: 13px; color: #555; }
+        input, button { width: 100%; padding: 10px; margin-top: 5px; box-sizing: border-box; border-radius: 4px; border: 1px solid #ccc; }
+        .btn-start { background: #28a745; color: white; border: none; cursor: pointer; font-weight: bold; font-size: 16px; margin-top: 15px; }
+        .btn-stop { background: #dc3545; color: white; border: none; cursor: pointer; font-weight: bold; margin-top: 8px; }
+        .btn-reset { background: #6c757d; color: white; border: none; cursor: pointer; margin-top: 8px; }
         button:disabled { background: #ccc; cursor: not-allowed; }
-        #log { font-family: monospace; font-size: 11px; height: 120px; overflow-y: auto; background: #222; color: #0f0; padding: 10px; margin-top: 10px; border-radius: 4px; }
+        #log { font-family: 'Consolas', monospace; font-size: 11px; height: 150px; overflow-y: auto; background: #1e1e1e; color: #00ff00; padding: 12px; margin-top: 15px; border-radius: 4px; border: 1px solid #333; line-height: 1.4; }
     </style>
 </head>
 <body>
 
+    <h1>LSDT POVM Reconstruction: SLSQP Iterative Solver</h1>
+
     <div class="dashboard">
-        <div class="panel controls">
-            <h3>LSDT Controls</h3>
-            <button id="btn-init" style="background:#007bff; color:white;">1. Initialize Engine</button>
-            <input type="file" id="file-in" disabled>
+        <div class="panel">
+            <h3>Parameters</h3>
+            <button id="btn-init" style="background:#0056b3; color:white;">1. Load Environment</button>
+            <input type="file" id="file-in" disabled title="Upload .txt or .dat files">
             
-            <label>Max Total Iterations</label>
+            <label>Total Optimization Steps</label>
             <input type="number" id="total-iter" value="100">
             
-            <label>Iters per Step</label>
+            <label>Iters per Update (Walking)</label>
             <input type="number" id="step-iter" value="5">
             
             <label>Max Photons (N)</label>
             <input type="number" id="max-n" value="20">
 
-            <label>Pulses</label>
+            <label>Scaling (Number of Pulses)</label>
             <input type="number" id="num-pulses" value="1">
 
-            <button id="btn-run" class="btn-start" disabled>2. Start Solver</button>
+            <button id="btn-run" class="btn-start" disabled>2. Start "Walking" Solver</button>
             <button id="btn-stop" class="btn-stop" disabled>Stop Execution</button>
+            <button id="btn-reset" class="btn-reset">Reset Solver State</button>
             
-            <div id="log">Ready to initialize...</div>
+            <div id="log">Status: Waiting for initialization...</div>
         </div>
 
         <div class="panel">
@@ -59,54 +63,66 @@
         let isRunning = false;
         let currentMaxC = 0;
 
-        const log = (m) => { const e = document.getElementById('log'); e.innerText += `\n> ${m}`; e.scrollTop = e.scrollHeight; };
+        const logMsg = (m) => { 
+            const e = document.getElementById('log'); 
+            e.innerText += `\n[${new Date().toLocaleTimeString()}] ${m}`; 
+            e.scrollTop = e.scrollHeight; 
+        };
 
         const pythonCode = `
 import numpy as np
 from scipy.optimize import minimize
 import math
 
-def get_F(alphas_sq, max_n):
+def get_poisson_F(alphas_sq, max_n):
     F = np.zeros((len(alphas_sq), max_n + 1))
     for i, mu in enumerate(alphas_sq):
         for n in range(max_n + 1):
             F[i, n] = np.exp(-mu) * (mu**n) / math.factorial(n)
+    # Completeness
     F[:, -1] = 1.0 - np.sum(F[:, :-1], axis=1)
     return np.clip(F, 0, 1)
 
 def solve_step(counts, alphas_sq, max_c, max_n, pulses, x0_list, iters):
     P_meas = np.array(counts).reshape((-1, max_c + 1))
-    F_prob = get_F(alphas_sq, max_n)
+    F_prob = get_poisson_F(alphas_sq, max_n)
     F_scaled = F_prob * pulses
-    w = 1.0 / (P_meas + 1.0)
+    weights = 1.0 / (P_meas + 1.0)
     
     x0 = np.array(x0_list)
     
-    def obj(x):
+    def objective_fn(x):
         povm = x.reshape((max_c + 1, max_n + 1))
         P_mod = F_scaled @ povm.T
-        return np.sum(w * ((P_mod - P_meas)**2))
+        return np.sum(weights * ((P_mod - P_meas)**2))
 
-    cons = [{'type': 'eq', 'fun': lambda x, n=i: np.sum(x.reshape((max_c+1, max_n+1))[:, n]) - 1.0} for i in range(max_n + 1)]
-    res = minimize(obj, x0, method='SLSQP', bounds=[(0,1)]*len(x0), constraints=cons, options={'maxiter': iters})
+    # Constraint: Each column (Fock state n) sums to 1 over outcomes c
+    cons = [{'type': 'eq', 'fun': lambda x, n_idx=i: np.sum(x.reshape((max_c+1, max_n+1))[:, n_idx]) - 1.0} for i in range(max_n + 1)]
     
-    # Calculate stats for GUI
+    res = minimize(objective_fn, x0, method='SLSQP', bounds=[(0,1)]*len(x0), constraints=cons, options={'maxiter': iters})
+    
     povm_res = res.x.reshape((max_c + 1, max_n + 1))
-    P_mod_prob = F_prob @ povm_res.T
-    mse = np.mean((P_mod_prob - (P_meas/pulses))**2)
+    P_mod_out = F_scaled @ povm_res.T
+    mse = np.mean(((P_mod_out/pulses) - (P_meas/pulses))**2)
     
-    return {"x": res.x.tolist(), "expected": (F_scaled @ povm_res.T).flatten().tolist(), "mse": float(mse)}
+    return {"povm_flat": res.x.tolist(), "expected_flat": P_mod_out.flatten().tolist(), "mse": float(mse)}
 `;
 
         document.getElementById('btn-init').onclick = async () => {
             const btn = document.getElementById('btn-init');
             btn.disabled = true;
-            log("Loading Pyodide & SciPy...");
-            pyodide = await loadPyodide();
-            await pyodide.loadPackage(['numpy', 'scipy']);
-            await pyodide.runPythonAsync(pythonCode);
-            log("Engine Ready.");
-            document.getElementById('file-in').disabled = false;
+            logMsg("Downloading Pyodide and SciPy binaries...");
+            try {
+                pyodide = await loadPyodide();
+                await pyodide.loadPackage(['numpy', 'scipy']);
+                await pyodide.runPythonAsync(pythonCode);
+                logMsg("Environment Ready.");
+                document.getElementById('file-in').disabled = false;
+                btn.textContent = "Python Ready";
+            } catch (err) {
+                logMsg("Initialization Error: " + err.message);
+                btn.disabled = false;
+            }
         };
 
         document.getElementById('file-in').onchange = (e) => {
@@ -115,43 +131,44 @@ def solve_step(counts, alphas_sq, max_c, max_n, pulses, x0_list, iters):
                 const lines = ev.target.result.trim().split('\n');
                 const header = lines[0].trim().split(/\s+/).map(Number);
                 currentMaxC = header[0];
-                const numA = header[1];
+                const numAlphas = header[1];
                 parsedAlphas = lines[1].trim().split(/\s+/).map(Number);
                 parsedCounts = lines.slice(2).flatMap(l => l.trim().split(/\s+/).map(Number));
                 
-                lastPovm = null; // Reset POVM for new data
-                initPlots(currentMaxC, numA);
+                lastPovm = null; 
+                initPlots(currentMaxC, numAlphas);
                 document.getElementById('btn-run').disabled = false;
-                log(`Data loaded. C_max=${currentMaxC}, Alphas=${numA}`);
+                logMsg(`File Loaded: ${numAlphas} alphas detected. C_max = ${currentMaxC}.`);
             };
             reader.readAsText(e.target.files[0]);
         };
 
         function initPlots(maxC, numA) {
-            // Fit Plot
+            // Plot 1: Fit Quality
             const traces = [];
             for(let c=0; c<=maxC; c++) {
-                const y = []; for(let i=0; i<numA; i++) y.push(parsedCounts[i*(maxC+1)+c]);
-                traces.push({ x: parsedAlphas, y: y, mode: 'markers', name: `Exp c=${c}` });
-                traces.push({ x: parsedAlphas, y: new Array(numA).fill(0), mode: 'lines', name: `Fit c=${c}`, line: {dash:'dot'} });
+                const y = []; 
+                for(let i=0; i<numA; i++) y.push(parsedCounts[i*(maxC+1)+c]);
+                // Experimental markers
+                traces.push({ x: parsedAlphas, y: y, mode: 'markers', name: `Exp c=${c}`, marker:{size:6} });
+                // Placeholder fit lines
+                traces.push({ x: parsedAlphas, y: new Array(numA).fill(0), mode: 'lines', name: `Fit c=${c}`, line: {dash:'dot', width:2} });
             }
-            Plotly.newPlot('plot-fit', traces, { title: 'Fit Quality', margin: {t:40} });
+            Plotly.newPlot('plot-fit', traces, { title: 'Experimental vs Reconstructed Counts', margin: {t:40}, xaxis:{title:'Alpha Squared'} });
 
-            // MSE Plot
-            Plotly.newPlot('plot-mse', [{ x: [], y: [], mode: 'lines+markers', name: 'MSE' }], 
-                { title: 'Log-MSE Convergence', yaxis: {type: 'log'}, margin: {t:40} });
+            // Plot 2: MSE
+            Plotly.newPlot('plot-mse', [{ x: [], y: [], mode: 'lines+markers', name: 'MSE', line:{color:'red'} }], 
+                { title: 'Optimization Convergence', yaxis: {type: 'log', title: 'MSE'}, xaxis:{title:'Step'}, margin: {t:40} });
 
-            // Heatmap
+            // Plot 3: Heatmap
             const maxN = parseInt(document.getElementById('max-n').value);
             const z = Array.from({length: maxC+1}, () => new Array(maxN+1).fill(0));
             Plotly.newPlot('plot-heat', [{ z: z, type: 'heatmap', colorscale: 'Viridis' }], 
-                { title: `POVM (C x N)`, xaxis: {title:'n'}, yaxis: {title:'c'} });
+                { title: `POVM Elements (Outcome vs Photons)`, xaxis: {title:'Photon Number (n)'}, yaxis: {title:'Click Outcome (c)'} });
         }
 
-        document.getElementById('btn-stop').onclick = () => {
-            isRunning = false;
-            log("Stopping...");
-        };
+        document.getElementById('btn-reset').onclick = () => { lastPovm = null; logMsg("Solver memory reset."); };
+        document.getElementById('btn-stop').onclick = () => { isRunning = false; logMsg("Stopping execution..."); };
 
         document.getElementById('btn-run').onclick = async () => {
             if(isRunning) return;
@@ -159,60 +176,65 @@ def solve_step(counts, alphas_sq, max_c, max_n, pulses, x0_list, iters):
             document.getElementById('btn-stop').disabled = false;
             document.getElementById('btn-run').disabled = true;
 
-            const total = parseInt(document.getElementById('total-iter').value);
-            const step = parseInt(document.getElementById('step-iter').value);
+            const totalSteps = parseInt(document.getElementById('total-iter').value);
+            const itersPerStep = parseInt(document.getElementById('step-iter').value);
             const maxN = parseInt(document.getElementById('max-n').value);
             const pulses = parseInt(document.getElementById('num-pulses').value);
-            const maxC = currentMaxC;
             
-            if(!lastPovm) {
-                lastPovm = new Array((maxC+1)*(maxN+1)).fill(1.0/(maxC+1));
-                log("Initialized uniform POVM guess.");
+            // Validate memory size vs current GUI params
+            const expectedSize = (currentMaxC + 1) * (maxN + 1);
+            if(!lastPovm || lastPovm.length !== expectedSize) {
+                lastPovm = new Array(expectedSize).fill(1.0/(currentMaxC+1));
+                logMsg(`Initializing uniform POVM: ${currentMaxC+1} outcomes x ${maxN+1} photons.`);
             }
 
-            for(let i=0; i < total; i += step) {
+            for(let i=0; i < totalSteps; i += itersPerStep) {
                 if(!isRunning) break;
                 
                 try {
-                    const result = await pyodide.globals.get("solve_step")(
-                        parsedCounts, parsedAlphas, maxC, maxN, pulses, lastPovm, step
+                    const pyResult = await pyodide.globals.get("solve_step")(
+                        parsedCounts, parsedAlphas, currentMaxC, maxN, pulses, lastPovm, itersPerStep
                     );
-                    const resJs = result.toJs();
-                    lastPovm = resJs.get('x');
+                    const res = pyResult.toJs();
+                    lastPovm = res.get('povm_flat');
                     
-                    // Update Heatmap
-                    const z = [];
-                    for(let c=0; c<=maxC; c++) z.push(lastPovm.slice(c*(maxN+1), (c+1)*(maxN+1)));
-                    Plotly.restyle('plot-heat', { z: [z] });
-
-                    // Update Fit Lines
-                    const expFlat = resJs.get('expected');
-                    const modelY = [];
-                    const modelIndices = [];
-                    for(let c=0; c<=maxC; c++) {
-                        const row = [];
-                        for(let a=0; a<parsedAlphas.length; a++) row.push(expFlat[a*(maxC+1)+c]);
-                        modelY.push(row);
-                        modelIndices.push((c * 2) + 1); // Select the 'Fit' line traces
+                    // 1. Update Heatmap
+                    const zData = [];
+                    for(let c=0; c<=currentMaxC; c++) {
+                        zData.push(lastPovm.slice(c*(maxN+1), (c+1)*(maxN+1)));
                     }
-                    Plotly.restyle('plot-fit', { y: modelY }, modelIndices);
+                    Plotly.restyle('plot-heat', { z: [zData] });
 
-                    // Update MSE
-                    Plotly.extendTraces('plot-mse', { x: [[i+step]], y: [[resJs.get('mse')]] }, [0]);
+                    // 2. Update Fit Lines (Update only every 2nd trace starting from index 1)
+                    const fitFlat = res.get('expected_flat');
+                    const fitY = [];
+                    const fitIndices = [];
+                    for(let c=0; c<=currentMaxC; c++) {
+                        const row = [];
+                        for(let a=0; a<parsedAlphas.length; a++) row.push(fitFlat[a*(currentMaxC+1)+c]);
+                        fitY.push(row);
+                        fitIndices.push((c * 2) + 1);
+                    }
+                    Plotly.restyle('plot-fit', { y: fitY }, fitIndices);
+
+                    // 3. Update MSE
+                    Plotly.extendTraces('plot-mse', { x: [[i+itersPerStep]], y: [[res.get('mse')]] }, [0]);
                     
-                    log(`Step ${i+step}/${total} | MSE: ${resJs.get('mse').toExponential(3)}`);
-                    result.destroy();
-                } catch (e) {
-                    log("Solver Error: " + e.message);
+                    logMsg(`Step ${i+itersPerStep}/${totalSteps} | MSE: ${res.get('mse').toExponential(3)}`);
+                    pyResult.destroy();
+                } catch (err) {
+                    logMsg("Error: " + err.message);
+                    lastPovm = null;
                     break;
                 }
-                await new Promise(r => setTimeout(r, 50)); 
+                // Small sleep to ensure UI updates
+                await new Promise(r => setTimeout(r, 40)); 
             }
             
             isRunning = false;
             document.getElementById('btn-stop').disabled = true;
             document.getElementById('btn-run').disabled = false;
-            log("Execution Finished.");
+            logMsg("Solver Task Complete.");
         };
     </script>
 </body>
