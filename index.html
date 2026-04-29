@@ -158,33 +158,33 @@ def run_lsdt_task(counts_flat, alphas_sq_flat, num_a, max_c, max_n, num_pulses):
             btnInit.disabled = true;
             logMsg("Initializing Environment...");
             try {
-                // 1. Use the official v0.25.0 release
-                pyodideInstance = await loadPyodide();
+                // Point specifically to the 'full' distribution index
+                pyodideInstance = await loadPyodide({
+                    indexURL: "https://cdn.jsdelivr.net/pyodide/v0.25.1/full/"
+                });
         
-                logMsg("Pyodide Core Loaded. Loading CVXOPT and NumPy...");
+                logMsg("Loading NumPy and CVXOPT binaries...");
                 
-                // 2. IMPORTANT: loadPackage is for WASM-compiled binaries (like cvxopt)
-                // micropip is only for "Pure Python" packages.
+                // This command looks for cvxopt.js and cvxopt.data in the indexURL above
                 await pyodideInstance.loadPackage(["numpy", "cvxopt"]);
         
-                logMsg("Verifying CVXOPT installation...");
+                logMsg("Verifying solver availability...");
                 await pyodideInstance.runPythonAsync(`
-                    import cvxopt
-                    import numpy as np
-                    print("CVXOPT version:", cvxopt.__version__)
+        import cvxopt
+        from cvxopt import solvers
+        print("Success: CVXOPT loaded.")
                 `);
         
                 logMsg("Loading LSDT Python logic...");
                 await pyodideInstance.runPythonAsync(pythonLSDTCode);
                 
-                logMsg("Ready. Upload your experimental data.");
-                btnInit.textContent = "Python Ready";
+                logMsg("Ready.");
+                btnInit.textContent = "Engine Ready";
                 fileInput.disabled = false;
             } catch (err) {
-                logMsg("Initialization Failed: " + err.message);
+                logMsg("Error: " + err.message);
                 console.error(err);
                 btnInit.disabled = false;
-                btnInit.textContent = "Retry Initialization";
             }
         });
         
