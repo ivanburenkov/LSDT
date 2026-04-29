@@ -103,53 +103,59 @@
         // --- Python LSDT Script ---
         const pythonLSDTCode = `
 import numpy as np
-from cvxopt import matrix, solvers
+from scipy.optimize import minimize
 import math
 
-def coherentStateProb(alpha, k):
-    return np.exp(-alpha**2) * alpha**(2*k) / math.factorial(k)
-
-def Fexperiment(mean_photon_numbers, k):
-    F = np.zeros((len(mean_photon_numbers), k + 1))
-    for j1, mu in enumerate(mean_photon_numbers):
-        for j2 in np.arange(k + 1):
-            F[j1, j2] = coherentStateProb(np.sqrt(mu), j2)
-    # Completeness constraint for truncated Fock space
+def get_poisson_matrix(alphas_sq, max_n):
+    num_a = len(alphas_sq)
+    F = np.zeros((num_a, max_n + 1))
+    for i, mu in enumerate(alphas_sq):
+        for n in range(max_n + 1):
+            # Poisson: exp(-mu) * mu^n / n!
+            F[i, n] = np.exp(-mu) * (mu**n) / math.factorial(n)
+    # Ensure completeness for the truncated Fock space
     F[:, -1] = 1.0 - np.sum(F[:, :-1], axis=1)
-    F[F < 0] = 0.0 # Clean up floating point errors
+    F = np.clip(F, 0, 1)
     return F
 
 def run_lsdt_task(counts_flat, alphas_sq_flat, num_a, max_c, max_n, num_pulses):
-    PMeas = np.array(counts_flat).reshape((num_a, max_c + 1))
-    mean_photon_number = np.array(alphas_sq_flat)
+    # Reshape data
+    # P_meas shape: (num_a, max_c + 1)
+    P_meas = np.array(counts_flat).reshape((num_a, max_c + 1))
+    alphas_sq = np.array(alphas_sq_flat)
+    F = get_poisson_matrix(alphas_sq, max_n) * num_pulses
     
-    n_outcomes = max_c + 1
-    k_plus_1 = max_n + 1
+    # Weights: 1/(counts + 1)
+    weights = 1.0 / (P_meas + 1.0)
+
+    # Initial guess: Uniform POVM
+    # x is a flattened POVM of size (max_c + 1) * (max_n + 1)
+    x0 = np.ones((max_c + 1) * (max_n + 1)) / (max_c + 1)
+
+    def objective(x):
+        # Reshape x to (max_c + 1, max_n + 1)
+        povm = x.reshape((max_c + 1, max_n + 1))
+        # P_model = F @ povm.T -> result is (num_a, max_c + 1)
+        P_model = F @ povm.T
+        diff = P_model - P_meas
+        return np.sum(weights * (diff**2))
+
+    # Constraints: Sum over c for each n must be 1
+    # For each n, sum_{c=0 to max_c} povm[c, n] = 1
+    cons = []
+    for n in range(max_n + 1):
+        def sum_to_one(x, n_idx=n):
+            povm = x.reshape((max_c + 1, max_n + 1))
+            return np.sum(povm[:, n_idx]) - 1.0
+        cons.append({'type': 'eq', 'fun': sum_to_one})
+
+    # Bounds: Each element between 0 and 1
+    bounds = [(0, 1) for _ in range(len(x0))]
+
+    # Run Solver
+    res = minimize(objective, x0, method='SLSQP', bounds=bounds, constraints=cons, options={'maxiter': 100})
     
-    solvers.options['show_progress'] = False
-    Fprime = Fexperiment(mean_photon_number, max_n)
-    
-    vecPMeas = PMeas.T.flatten() # Order: [c0a0, c0a1... c1a0...]
-    
-    W = np.diag(1.0 / (vecPMeas + 1.0))
-    IdF = np.kron(np.identity(n_outcomes), Fprime * num_pulses)
-    
-    Q = matrix(2. * IdF.T @ W @ IdF)
-    q = matrix(-2. * IdF.T @ W @ vecPMeas)
-    
-    Gpos = matrix(-np.identity(k_plus_1 * n_outcomes))
-    hpos = matrix(np.zeros(k_plus_1 * n_outcomes))
-    
-    # Sum over outcomes for a given input state equals 1
-    Asum = np.zeros((k_plus_1, k_plus_1 * n_outcomes))
-    for n in range(k_plus_1):
-        for c in range(n_outcomes):
-            Asum[n, c * k_plus_1 + n] = 1.0
-            
-    bsum = matrix(np.ones(k_plus_1))
-    
-    sol = solvers.qp(Q, q, Gpos, hpos, matrix(Asum), bsum)
-    return list(sol['x'])
+    return res.x.tolist()
 `;
 
         // --- Pyodide Initialization ---
@@ -158,22 +164,11 @@ def run_lsdt_task(counts_flat, alphas_sq_flat, num_a, max_c, max_n, num_pulses):
             btnInit.disabled = true;
             logMsg("Initializing Environment...");
             try {
-                // Point specifically to the 'full' distribution index
-                pyodideInstance = await loadPyodide({
-                    indexURL: "https://cdn.jsdelivr.net/pyodide/v0.25.1/full/"
-                });
+                pyodideInstance = await loadPyodide();
         
-                logMsg("Loading NumPy and CVXOPT binaries...");
-                
-                // This command looks for cvxopt.js and cvxopt.data in the indexURL above
-                await pyodideInstance.loadPackage(["numpy", "cvxopt"]);
-        
-                logMsg("Verifying solver availability...");
-                await pyodideInstance.runPythonAsync(`
-        import cvxopt
-        from cvxopt import solvers
-        print("Success: CVXOPT loaded.")
-                `);
+                logMsg("Loading NumPy and SciPy... (this may take a minute)");
+                // loadPackage handles the WASM binaries for both
+                await pyodideInstance.loadPackage(["numpy", "scipy"]);
         
                 logMsg("Loading LSDT Python logic...");
                 await pyodideInstance.runPythonAsync(pythonLSDTCode);
@@ -183,7 +178,6 @@ def run_lsdt_task(counts_flat, alphas_sq_flat, num_a, max_c, max_n, num_pulses):
                 fileInput.disabled = false;
             } catch (err) {
                 logMsg("Error: " + err.message);
-                console.error(err);
                 btnInit.disabled = false;
             }
         });
