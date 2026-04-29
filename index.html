@@ -153,7 +153,41 @@ def run_lsdt_task(counts_flat, alphas_sq_flat, num_a, max_c, max_n, num_pulses):
 `;
 
         // --- Pyodide Initialization ---
+
         btnInit.addEventListener('click', async () => {
+            btnInit.disabled = true;
+            logMsg("Downloading Pyodide... (This may take a moment)");
+            try {
+                // 1. Load the core Pyodide environment
+                pyodideInstance = await loadPyodide({
+                    indexURL: "https://cdn.jsdelivr.net/pyodide/v0.25.0/full/"
+                });
+        
+                logMsg("Pyodide loaded. Loading micropip...");
+                // 2. Load 'micropip' - Pyodide's internal package manager
+                await pyodideInstance.loadPackage("micropip");
+                const micropip = pyodideInstance.pyimport("micropip");
+        
+                logMsg("Installing cvxopt and numpy via micropip...");
+                // 3. Use micropip to install. This is more reliable for C-extensions.
+                await micropip.install('cvxopt');
+                await micropip.install('numpy');
+        
+                logMsg("Packages installed. Loading LSDT Python logic...");
+                await pyodideInstance.runPythonAsync(pythonLSDTCode);
+                
+                logMsg("Ready. You may now upload data.");
+                btnInit.textContent = "Python Ready";
+                fileInput.disabled = false;
+            } catch (err) {
+                logMsg("Failed to load Pyodide: " + err);
+                console.error(err);
+                btnInit.disabled = false;
+                btnInit.textContent = "Retry Initialization";
+            }
+        });
+        
+        /*btnInit.addEventListener('click', async () => {
             btnInit.disabled = true;
             logMsg("Downloading Pyodide... (This may take a moment)");
             try {
@@ -169,7 +203,7 @@ def run_lsdt_task(counts_flat, alphas_sq_flat, num_a, max_c, max_n, num_pulses):
                 logMsg("Failed to load Pyodide: " + err);
                 btnInit.disabled = false;
             }
-        });
+        });*/
 
         // --- File Parsing ---
         fileInput.addEventListener('change', function(e) {
