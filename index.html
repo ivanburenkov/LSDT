@@ -119,7 +119,7 @@ def run_continuous_mle(P_list, alpha_list, n_outcomes, k_plus_1, n_pulses, max_i
     
     # define objective (Note: adding +1e-10 to avoid domain errors when taking the log of 0)
     #maxLLObj = cp.Maximize( cp.trace( P_meas.T @ cp.log(F @ piOpt + 1e-10) ) / n_pulses )
-    maxLLObj = cp.Minimize( cp.sum((P_meas.T - n_pulses*F@piOpt)**2/(P_meas.T+0.5) ))
+    maxLLObj = cp.Minimize( cp.sum((P_meas - n_pulses*F@piOpt)**2/(P_meas+0.5) ))
     # define problem 
     maxLLProb = cp.Problem(maxLLObj, constraints)
     
