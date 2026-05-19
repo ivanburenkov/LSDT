@@ -1,1 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LSDT: SLSQP Iterative Solver</title>
+    
+    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js"></script>
 
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 1500px; margin: 0 auto; padding: 20px; color: #333; background-color: #f4f7f6; }
+        h1 { border-bottom: 2px solid #0056b3; padding-bottom: 10px; color: #0056b3; }
+        .dashboard { display: grid; grid-template-columns: 380px 1fr 1.2fr; gap: 20px; margin-top: 20px; }
+        
+        .panel { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .plot-container { width: 100%; height: 380px; background: #fafafa; border: 1px solid #eee; border-radius: 4px; margin-bottom: 15px; }
+        
+        .form-group { margin-bottom: 12px; }
+        label { display: block; font-weight: bold; margin-bottom: 5px; font-size: 13px; }
+        input[type="number"], input[type="file"] { width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        
+        button { border: none; padding: 12px; cursor: pointer; border-radius: 4px; font-size: 15px; width: 100%; font-weight: bold; margin-bottom: 10px; transition: opacity 0.2s; }
+        #btn-init { background: #0056b3; color: white; }
+        #btn-run { background: #28a745; color: white; }
+        #btn-stop { background: #dc3545; color: white; }
+        #btn-reset { background: #6c757d; color: white; }
+        button:disabled { background: #cccccc !important; cursor: not-allowed; }
+        
+        .log-area { width: 100%; height: 150px; background: #1e1e1e; color: #00ff00; border: none; border-radius: 4px; padding: 10px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 12px; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+    <h1>Least Squares Detector Tomography (LSDT)</h1>
+
+    <div class="dashboard">
+        <div class="panel">
+            <h3>Controls</h3>
+            <button id="btn-init">1. Initialize Engine</button>
+            
+            <div class="form-group">
+                <label>Experimental Data File</label>
+                <input type="file" id="data-file" accept=".txt,.dat" disabled>
+            </div>
+
+            <div style="display: flex; gap: 10px;">
+                <div class="form-group" style="flex:1">
+                    <label>Max Photons (N)</label>
+                    <input type="number" id="max-n" value="20">
+                </div>
+                <div class="form-group" style="flex:1">
+                    <label>Pulses</label>
+                    <input type="number" id="num-pulses" value="1">
+                </div>
+            </div>
+
+            <div style="display: flex; gap: 10px;">
+                <div class="form-group" style="flex:1">
+                    <label>Total Steps</label>
+                    <input type="number" id="total-iter" value="100">
+                </div>
+                <div class="form-group" style="flex:1">
+                    <label>Step Size</label>
+                    <input type="number" id="step-iter" value="5">
+                </div>
+            </div>
+
+            <hr style="border: 0; border-top: 1px solid #ddd; margin: 15px 0;">
+
+            <button id="btn-run" disabled>2. Start Walking Solver</button>
+            <button id="btn-stop" disabled>Stop Execution</button>
+            <button id="btn-reset">Reset Solver State</button>
+            
+            <div id="log-output" class="log-area">Ready to initialize...</div>
+        </div>
+
+        <div class="panel">
+            <div id="plot-fit" class="plot-container"></div>
+            <div id="plot-mse" class="plot-container"></div>
+        </div>
+
+        <div class="panel">
+            <div id="plot-heat" class="plot-container" style="height: 780px;"></div>
+        </div>
+    </div>
+
+    <script>
+        let pyodide, parsedAlphas, parsedCounts, lastPovm = null;
+        let isRunning = false;
+        let currentMaxC = 0;
+
+        const logMsg = (m) => {
+            const e = document.getElementById('log-output');
+            e.innerText += `\n[${new Date().toLocaleTimeString()}] ${m}`;
+            e.scrollTop = e.scrollHeight;
+        };
+
+        const pythonCode = `
+import numpy as np
+from scipy.optimize import minimize
+import math
+
+def get_F(alphas_sq, max_n):
+    num_a = len(alphas_sq)
+    F = np.zeros((num_a, max_n + 1))
+    for i, mu in enumerate(alphas_sq):
+        for n in range(max_n + 1):
+            F[i, n] = np.exp(-mu) * (mu**n) / math.factorial(n)
+    F[:, -1] = 1.0 - np.sum(F[:, :-1], axis=1)
+    return np.clip(F, 0, 1)
+
+def solve_step(counts, alphas_sq, max_c, max_n, pulses, x0_list, iters):
+    n_outcomes = max_c + 1
+    k_plus_1 = max_n + 1
+    P_meas = np.array(counts).reshape((-1, n_outcomes))
+    F_prob = get_F(alphas_sq, max_n)
+    F_scaled = F_prob * pulses
+    w = 1.0 / (P_meas + 1.0)
+    
+    x0 = np.array(x0_list)
+    
+    def obj(x):
+        povm = x.reshape((n_outcomes, k_plus_1))
+        return np.sum(w * ((F_scaled @ povm.T - P_meas)**2))
+
+    cons = [{'type': 'eq', 'fun': lambda x, n=i: np.sum(x.reshape((n_outcomes, k_plus_1))[:, n]) - 1.0} for i in range(k_plus_1)]
+    res = minimize(obj, x0, method='SLSQP', bounds=[(0,1)]*len(x0), constraints=cons, options={'maxiter': iters})
+    
+    povm_res = res.x.reshape((n_outcomes, k_plus_1))
+    P_mod = F_prob @ povm_res.T
+    mse = np.mean((P_mod - (P_meas/pulses))**2)
+    
+    return {"x": res.x.tolist(), "expected": (F_scaled @ povm_res.T).flatten().tolist(), "mse": float(mse)}
+`;
+
+        document.getElementById('btn-init').onclick = async () => {
+            const btn = document.getElementById('btn-init');
+            btn.disabled = true;
+            logMsg("Loading Pyodide & SciPy...");
+            try {
+                pyodide = await loadPyodide();
+                await pyodide.loadPackage(['numpy', 'scipy']);
+                await pyodide.runPythonAsync(pythonCode);
+                logMsg("Python Engine Ready.");
+                document.getElementById('data-file').disabled = false;
+                btn.textContent = "Engine Active";
+            } catch (err) {
+                logMsg("Error: " + err.message);
+            }
+        };
+
+        document.getElementById('data-file').onchange = (e) => {
+            const file = e.target.files[0];
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                const tokens = ev.target.result.trim().split(/\s+/).filter(Boolean);
+                let idx = 0;
+                currentMaxC = parseInt(tokens[idx++]);
+                const numA = parseInt(tokens[idx++]);
+                
+                parsedAlphas = [];
+                for(let i=0; i<numA; i++) parsedAlphas.push(parseFloat(tokens[idx++]));
+                
+                parsedCounts = [];
+                const totalC = numA * (currentMaxC + 1);
+                for(let i=0; i<totalC; i++) parsedCounts.push(parseFloat(tokens[idx++]));
+                
+                lastPovm = null; 
+                initPlots(currentMaxC, numA);
+                document.getElementById('btn-run').disabled = false;
+                logMsg(`Data Loaded: Cmax=${currentMaxC}, numA=${numA}`);
+            };
+            reader.readAsText(file);
+        };
+
+        function initPlots(maxC, numA) {
+            const traces = [];
+            for(let c=0; c<=maxC; c++) {
+                const y = [];
+                for(let i=0; i<numA; i++) y.push(parsedCounts[i*(maxC+1)+c]);
+                traces.push({ x: parsedAlphas, y: y, mode: 'markers', name: `Exp c=${c}` });
+                traces.push({ x: parsedAlphas, y: new Array(numA).fill(0), mode: 'lines', name: `Fit c=${c}`, line: {dash:'dot'} });
+            }
+            Plotly.newPlot('plot-fit', traces, { title: 'Fit Accuracy', margin: {t:40} });
+            Plotly.newPlot('plot-mse', [{ x: [], y: [], mode: 'lines+markers', name: 'MSE' }], { title: 'Convergence (Log-MSE)', yaxis: {type: 'log'}, margin: {t:40} });
+            
+            const maxN = parseInt(document.getElementById('max-n').value);
+            Plotly.newPlot('plot-heat', [{ z: Array.from({length: maxC+1}, () => new Array(maxN+1).fill(0)), type: 'heatmap', colorscale: 'Viridis' }], { title: 'POVM Elements', xaxis: {title:'n'}, yaxis: {title:'c'} });
+        }
+
+        document.getElementById('btn-stop').onclick = () => { isRunning = false; };
+        document.getElementById('btn-reset').onclick = () => { lastPovm = null; logMsg("Memory cleared."); };
+
+        document.getElementById('btn-run').onclick = async () => {
+            if(isRunning) return;
+            isRunning = true;
+            document.getElementById('btn-run').disabled = true;
+            document.getElementById('btn-stop').disabled = false;
+
+            const total = parseInt(document.getElementById('total-iter').value);
+            const step = parseInt(document.getElementById('step-iter').value);
+            const maxN = parseInt(document.getElementById('max-n').value);
+            const pulses = parseInt(document.getElementById('num-pulses').value);
+            const size = (currentMaxC + 1) * (maxN + 1);
+
+            if(!lastPovm || lastPovm.length !== size) {
+                lastPovm = new Array(size).fill(1.0 / (currentMaxC + 1));
+                logMsg(`Re-initializing POVM guess [${currentMaxC+1}x${maxN+1}]`);
+            }
+
+            for(let i=0; i < total; i += step) {
+                if(!isRunning) break;
+                try {
+                    const result = await pyodide.globals.get("solve_step")(parsedCounts, parsedAlphas, currentMaxC, maxN, pulses, lastPovm, step);
+                    const resJs = result.toJs();
+                    lastPovm = resJs.get('x');
+                    
+                    // Update Plotly
+                    const z = [];
+                    for(let c=0; c<=currentMaxC; c++) z.push(lastPovm.slice(c*(maxN+1), (c+1)*(maxN+1)));
+                    Plotly.restyle('plot-heat', { z: [z] });
+
+                    const expFlat = resJs.get('expected'), modelY = [], modelIdx = [];
+                    for(let c=0; c<=currentMaxC; c++) {
+                        const row = [];
+                        for(let a=0; a<parsedAlphas.length; a++) row.push(expFlat[a*(currentMaxC+1)+c]);
+                        modelY.push(row); modelIdx.push((c*2)+1);
+                    }
+                    Plotly.restyle('plot-fit', { y: modelY }, modelIdx);
+                    Plotly.extendTraces('plot-mse', { x: [[i+step]], y: [[resJs.get('mse')]] }, [0]);
+                    
+                    logMsg(`Step ${i+step}/${total} - MSE: ${resJs.get('mse').toExponential(2)}`);
+                    result.destroy();
+                } catch (e) {
+                    logMsg("Solver Crash: " + e.message);
+                    break;
+                }
+                await new Promise(r => setTimeout(r, 40));
+            }
+            isRunning = false;
+            document.getElementById('btn-run').disabled = false;
+            document.getElementById('btn-stop').disabled = true;
+        };
+    </script>
+</body>
+</html>
